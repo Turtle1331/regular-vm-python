@@ -1,0 +1,7 @@
+0b 01 04 00  # Load address 0x04 into r1
+fe 10 01 01  # Map terminal device at 0x04
+0b 01 04 00  # Reload r1 (overwritten with device length)
+
+0f 02 01 00  # Read a character from the terminal
+10 01 02 00  # Print it to the terminal
+0b 00 0c 00  # Jump up two instructions
