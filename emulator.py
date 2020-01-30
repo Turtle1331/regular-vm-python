@@ -614,6 +614,7 @@ if __name__ == '__main__':
 	file_format.add_argument('-m', '--memory', action='store_true', help='parse program as memory file')
 	file_format.add_argument('-g', '--guess-format', action='store_true', help='guess program format from file extension')
 	parser.add_argument('-s', '--save-memory', help='save memory to file when stopped')
+        parser.add_argument('-d', '--debug', action='store_true', help='emulate program in debug mode')
 	args = parser.parse_args()
 
 	if args.guess_format:
@@ -633,6 +634,8 @@ if __name__ == '__main__':
 					args.save_memory = args.file
 		else:
 			raise RuntimeError('Could not guess program format from extension')
+
+        DEBUG = args.debug
 
 	# Load program file
 	if args.hex:
