@@ -4,6 +4,7 @@ from enum import Enum
 import struct
 import sys
 import argparse
+import time
 
 try:
 	import console
@@ -28,6 +29,8 @@ mainloop:
 
 DEBUG = False
 DEBUG_STEP_MODE = True
+
+ERROR_ON_BAD_DEVICE = True
 
 
 def int_to_bytes(data, data_len):
@@ -92,6 +95,7 @@ class MemoryUnit (object):
 
 	def create_page(self, index, data=None, overwrite=False):
 		index = int(index)
+		data = data or bytearray()
 		if index in self.pages and not overwrite:
 			raise RuntimeError('Attempted to overwrite page without overwrite flag')
 		if index < 0 or index >= self.PAGE_COUNT:
@@ -103,7 +107,7 @@ class MemoryUnit (object):
 		if data:
 			data_len = min(self.PAGE_SIZE, len(data))
 			page[:data_len] = data[:data_len]
-			self.pages[index] = page
+		self.pages[index] = page
 
 
 	def delete_page(self, index):
@@ -152,8 +156,9 @@ class MemoryUnit (object):
 			raise ValueError('Attempted to write more than one word')
 
 		addr = int(addr)
+		old_addr = addr
 		index = addr // self.PAGE_SIZE
-		addr -= index
+		addr &= (self.PAGE_SIZE - 1)
 
 		if data_len > 1 and addr % WORD_SIZE != 0:
 			policy = self.offset_write_policy
@@ -169,7 +174,7 @@ class MemoryUnit (object):
 					self.write_data(index + addr + extra, data[data_len:], device=False)
 
 		if index not in self.pages:
-			create_page(self, index)
+			self.create_page(index)
 		page = self.pages[index]
 
 		if DEBUG:
@@ -178,8 +183,8 @@ class MemoryUnit (object):
 
 
 	def _read_memory(self, addr, data_len):
-		if data_len > WORD_SIZE:
-			raise ValueError('Attempted to read more than one word')
+		#if data_len > WORD_SIZE:
+			#raise ValueError('Attempted to read more than one word')
 
 		addr = int(addr)
 		old_addr = addr
@@ -326,7 +331,7 @@ class RegisterUnit (object):
 
 
 class InstructionUnit (object):
-	def __init__(self, register_unit, memory_unit, config_func):
+	def __init__(self, register_unit, memory_unit, send_func):
 		self.instructions = {
 			0x00: self.nop,
 			0x01: self.add,
@@ -345,12 +350,12 @@ class InstructionUnit (object):
 			0x0e: self.stw,
 			0x0f: self.ldb,
 			0x10: self.stb,
-			0xfe: self.cfg,
+			0xfd: self.snd,
 			0xff: self.hlt,
 		}
 		self.registers = register_unit
 		self.memory = memory_unit
-		self.config_func = config_func
+		self.send_func = send_func
 
 
 	def execute_instruction(self, word):
@@ -453,12 +458,12 @@ class InstructionUnit (object):
 		width = WORD_SIZE * 8
 		x &= 2 ** width - 1
 		y &= 2 ** width - 1
-		return int(math.copysign(1, x - y))
+		return 1 if x - y > 0 else (0 if x == y else -1)
 
 
 	@three_reg_op
 	def tcs(self, x, y):
-		return int(math.copysign(1, x - y))
+		return 1 if x - y > 0 else (0 if x == y else -1)
 
 
 	def set(self, ra='r1', imm='imm2'):
@@ -480,7 +485,7 @@ class InstructionUnit (object):
 
 	def stw(self, ra='r1', rb='r1'):
 		vb = self.registers.get_value(rb)
-		va = int_to_bytes(vh, 4)
+		va = int_to_bytes(vb, 4)
 		ma = self.registers.get_value(ra)
 		ma &= (2 ** (WORD_SIZE * 8)) - 1
 		self.memory.write_data(ma, va)
@@ -504,55 +509,123 @@ class InstructionUnit (object):
 		self.memory.write_data(ma, va)
 
 
-	def cfg(self, ra='r1', rb='r1', rc='r1'):
-		self.config_func(ra, rb, rc)
+	def snd(self, ra='r1', rb='r1'):
+		vb = self.registers.get_value(rb)
+		va = self.registers.get_value(ra)
+		va &= (2 ** (WORD_SIZE * 8)) - 1
+		self.send_func(va, vb)
 
 
-	def hlt(self):
-		if DEBUG:
-			print 'Halt.'
+	def hlt(self, ra='r1'):
+		va = self.registers.get_value(ra)
+		print 'Halt with code 0x%x.' % va
 		sys.exit()
 
 
-
-class TerminalDevice (object):
-	DEVICE_ID = 0x01
-	DEVICE_LENGTH = 1
+class DeviceBase (object):
 	def __init__(self):
-		self.input_prefix = 'Terminal input: ' if DEBUG else ''
-		self.output_prefix = 'Terminal output: ' if DEBUG else ''
+		self.device_interface = None
+
+	def attach(self, device_interface):
+		self.device_interface = device_interface
+
+	def receive(self, data):
+		raise NotImplemented()
+
+	def detach(self):
+		self.device_interface = None
+
+
+class TerminalInputDevice (DeviceBase):
+	def __init__(self):
+		super(TerminalInputDevice, self).__init__()
+		self.input_prefix = 'Terminal input: ' if DEBUG else '> '
 		self.input_buffer = bytearray()
-		self.output_buffer = bytearray()
 
-
-
-	def read_data(self, offset, data_len):
-		if not (offset == 0 and data_len == 1):
-			raise ValueError('Bad read from terminal device')
-
+	def receive(self, addr):
 		if not self.input_buffer:
 			try:
-				inp = raw_input(self.input_prefix)
+				if DEBUG and DEBUG_STEP_MODE:
+					print self.input_prefix,
+					time.sleep(1)
+					inp = raw_input()
+				else:
+					inp = raw_input(self.input_prefix)
 			except EOFError:
 				raise KeyboardInterrupt()
-			inp = [ord(x) for x in inp if ord(x) < 128]
+
+			inp = inp.encode('ascii', 'ignore')
 			self.input_buffer = bytearray(inp)
-			self.input_buffer.append(0xff)
+			self.input_buffer.append(0x00)
 
-		value = self.input_buffer[0:1]
+		value = self.input_buffer[:1]
 		self.input_buffer.pop(0)
-		return value
+		self.device_interface.write_bytes(addr, value, 1)
 
-	def write_data(self, offset, data):
-		if not (offset == 0 and len(data) == 1):
-			raise ValueError('Bad write to terminal device')
 
-		if data == '\xff':
-			print self.output_buffer
-			self.output_buffer = bytearray(self.output_prefix)
-		else:
-			self.output_buffer.append(data)
 
+class TerminalOutputDevice (DeviceBase):
+	def __init__(self):
+		super(TerminalOutputDevice, self).__init__()
+		self.output_prefix = 'Terminal output: ' if DEBUG else ''
+		self.chunk_size = 1024
+
+	def receive(self, addr):
+		# addr &= ~3
+		output = bytearray(self.output_prefix)
+		
+		while True:
+			chunk = self.device_interface.read_bytes(addr, self.chunk_size)
+			
+			end_pos = chunk.find('\x00')
+			if end_pos == -1:
+				output += chunk
+			else:
+				output.extend(chunk[:end_pos])
+				break
+		
+		print output.decode('ascii', 'ignore')
+
+
+
+class BusInterface (object):
+	def __init__(self, memory_unit):
+		self._memory_unit = memory_unit
+	
+	def read_bytes(self, addr, num_bytes):
+		return self._memory_unit.read_data(addr, num_bytes, device=False)
+	
+	def read_words(self, addr, num_words):
+		return self._memory_unit.read_data(addr, num_words * 4, device=False)
+	
+	def write_bytes(self, addr, data, num_bytes):
+		data = data[:num_bytes]
+		self._memory_unit.write_data(addr, data)
+	
+	def write_words(self, addr, data, num_words):
+		data = data[:num_words * 4]
+		self._memory_unit.write_data(addr, data)
+
+
+class DeviceInterface (object):
+	def __init__(self, bus_interface, device_id):
+		self._bus_interface = bus_interface
+		self._device_id = device_id
+
+	def read_bytes(self, addr, num_bytes):
+		return self._bus_interface.read_bytes(addr, num_bytes)
+
+	def read_words(self, addr, num_words):
+		return self._bus_interface.read_words(addr, num_words)
+
+	def write_bytes(self, addr, data, num_bytes):
+		self._bus_interface.write_bytes(addr, data, num_bytes)
+
+	def write_words(self, addr, data, num_words):
+		self._bus_interface.write_words(addr, data, num_words)
+
+	def device_id(self):
+		return self._device_id
 
 
 
@@ -560,49 +633,71 @@ class CentralUnit (object):
 	def __init__(self, program):
 		self.register_unit = RegisterUnit()
 		self.memory_unit = MemoryUnit()
-		self.instruction_unit = InstructionUnit(self.register_unit, self.memory_unit, self.set_config_value)
+		self.bus_interface = BusInterface(self.memory_unit)
+		self.instruction_unit = InstructionUnit(self.register_unit, self.memory_unit, self.send_value)
 		self.devices = {}
 
-		self.register_device(TerminalDevice())
+		self.register_device(TerminalInputDevice, 0x01)
+		self.register_device(TerminalOutputDevice, 0x02)
 
 		self.memory_unit.load_program(program)
 
 
 	def mainloop(self):
-		while True:
-			pc = self.register_unit.get_pc()
-			inst_word = self.memory_unit.read_data(pc, 4, device=False)
-			self.register_unit.increment_pc()
-			self.instruction_unit.execute_instruction(inst_word)
-			if DEBUG and DEBUG_STEP_MODE:
-				try:
-					raw_input()
-				except EOFError:
-					raise KeyboardInterrupt()
+		try:
+			while True:
+				pc = self.register_unit.get_pc()
+				inst_word = self.memory_unit.read_data(pc, 4, device=False)
+				self.register_unit.increment_pc()
+				self.instruction_unit.execute_instruction(inst_word)
+				if DEBUG and DEBUG_STEP_MODE:
+					try:
+						if raw_input():
+							raise KeyboardInterrupt()
+					except EOFError:
+						raise KeyboardInterrupt()
+		except KeyboardInterrupt as e:
+			self.stop()
+			raise e
 
 
-	def register_device(self, device):
-		dev_id = device.DEVICE_ID
-		dev_len = device.DEVICE_LENGTH
-		self.devices[dev_id] = (device, dev_len)
+	def stop(self):
+		for _, device in self.devices.items():
+			device.detach()
 
 
-	def set_config_value(self, key, val_a, val_b):
-		key &= (2 ** (2 * 8)) - 1
-		val_ab = (val_a << (2 * 8)) | val_b
-		if key == 0x0000:
+	def register_device(self, device_cls, device_id):
+		device = device_cls()
+		device_inter = DeviceInterface(self.bus_interface, device_id)
+		device.attach(device_inter)
+		self.devices[device_id] = device
+
+
+	def send_value(self, val_a, val_b):
+		device_id, device_cmd = val_a, val_b
+		if device_id in self.devices:
+			device = self.devices[device_id]
+			device.receive(device_cmd)
+		elif ERROR_ON_BAD_DEVICE:
+			raise RuntimeError('no device found with id 0x%x' % device_id)
+
+		'''
+		val_a &= (2 ** (2 * 8)) - 1
+		val_bc = (val_b << (2 * 8)) | val_c
+		if val_a == 0x0000:
 			# Real mode
 			pass
-		elif key == 0x10:
+		elif val_a == 0x10:
 			# Memory-mapped IO
-			start_addr = self.register_unit.get_value(val_a)
-			dev_id = val_b
+			start_addr = self.register_unit.get_value(val_b)
+			dev_id = val_c
 			dev_len = 0
 			if dev_id in self.devices:
 				device, dev_len = self.devices[dev_id]
 				self.memory_unit.map_memory(device, start_addr, dev_len)
 
-			self.register_unit.set_value(val_a, dev_len)
+			self.register_unit.set_value(val_b, dev_len)
+		'''
 
 
 
@@ -613,8 +708,9 @@ if __name__ == '__main__':
 	file_format.add_argument('-x', '--hex', action='store_true', help='parse program as hex')
 	file_format.add_argument('-m', '--memory', action='store_true', help='parse program as memory file')
 	file_format.add_argument('-g', '--guess-format', action='store_true', help='guess program format from file extension')
+	parser.add_argument('-w', '--write-program', help='write parsed program to binary file')
 	parser.add_argument('-s', '--save-memory', help='save memory to file when stopped')
-        parser.add_argument('-d', '--debug', action='store_true', help='emulate program in debug mode')
+	parser.add_argument('-d', '--debug', action='store_true', help='emulate program in debug mode')
 	args = parser.parse_args()
 
 	if args.guess_format:
@@ -635,7 +731,7 @@ if __name__ == '__main__':
 		else:
 			raise RuntimeError('Could not guess program format from extension')
 
-        DEBUG = args.debug
+	DEBUG = args.debug
 
 	# Load program file
 	if args.hex:
@@ -652,6 +748,10 @@ if __name__ == '__main__':
 		with open(args.file, 'rb') as f:
 			program = bytearray(f.read())
 
+	if args.write_program:
+		with open(args.write_program, 'wb') as f:
+			f.write(program)
+
 	cpu = CentralUnit(program)
 	if args.memory:
 		cpu.memory_unit.load_from_file(args.file)
@@ -663,4 +763,3 @@ if __name__ == '__main__':
 	finally:
 		if args.save_memory:
 			cpu.memory_unit.save_to_file(args.save_memory)
-

@@ -1,7 +1,37 @@
-0b 01 04 00  # Load address 0x04 into r1
-fe 10 01 01  # Map terminal device at 0x04
-0b 01 04 00  # Reload r1 (overwritten with device length)
+# setup device constants
+0b 0e 01 00  # r14 = 01 (TerminalInputDevice)
+0b 0f 02 00  # r15 = 02 (TerminalOutputDevice)
 
-0f 02 01 00  # Read a character from the terminal
-10 01 02 00  # Print it to the terminal
-0b 00 0c 00  # Jump up two instructions
+# setup input/output constants
+0b 0a 50 00  # r10 = 50 (+20w)  # buffer start
+0b 0b 01 00  # r11 = 01 (+1b)
+0b 0d 00 00  # r13 = 00 (null terminator)
+
+
+# setup input/output variables
+0c 0c 0a 00  # r12 = r10  # buffer curr
+
+# get input char
+fd 0e 0c 00  # snd r14 r12
+0b 01 00 00  # r1 = 0
+0f 01 0c 00  # r1 = memb[r12]
+
+# check if null terminator
+09 01 0d 01  # r1 = r13 <u> r1
+0b 02 0c 00  # r2 = 0c (+3w)
+03 01 01 02  # r1 &= r2
+01 00 00 01  # pc += r1
+
+
+# case: null terminator
+# output, jump to setup input/output variables
+fd 0f 0a 00  # snd r15 r11
+0b 01 2c 00  # r1 = 2c (+11w)
+02 00 00 01  # pc -= r1
+
+
+# case: not null terminator
+# increment buffer curr, jump to get input char
+01 0c 0c 0b  # r12 += r11
+0b 01 34 00  # r1 = 34 (+13w)
+02 00 00 01  # pc -= r1
