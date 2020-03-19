@@ -4,7 +4,7 @@ Python emulator for the regular-vm ISA: https://github.com/regular-vm/specificat
 To get started: `$ ./interpreter.py -g cat.hex`
 
 More details: 
-`
+```
 $ ./emulator.py -h
 
 usage: Emulate a program with the regular-vm ISA.  [-h] [-x | -m | -g]
@@ -25,4 +25,4 @@ optional arguments:
   -s SAVE_MEMORY, --save-memory SAVE_MEMORY
                         save memory to file when stopped
   -d, --debug           emulate program in debug mode
-`
+```
